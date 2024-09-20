@@ -1,0 +1,3 @@
+[submodule "libjuice"]
+	path = libjuice
+	url = git@github.com:paullouisageneau/libjuice.git

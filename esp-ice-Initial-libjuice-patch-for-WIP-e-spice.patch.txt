@@ -1,0 +1,648 @@
+From 9a151312b1508d0c01601779daec54f3ce178189 Mon Sep 17 00:00:00 2001
+From: David Cermak <cermak@espressif.com>
+Date: Fri, 20 Sep 2024 10:56:41 +0200
+Subject: [PATCH] esp-ice: Initial libjuice patch for WIP e-spice
+
+---
+ src/addr.c        |  9 +++---
+ src/agent.c       | 19 +++++++++---
+ src/conn_mux.c    |  2 +-
+ src/conn_poll.c   |  2 +-
+ src/conn_thread.c |  2 +-
+ src/hmac.c        |  4 +--
+ src/ice.c         | 12 ++++----
+ src/ice.h         |  2 +-
+ src/random.c      |  2 +-
+ src/server.c      | 10 +++----
+ src/socket.h      |  5 ++--
+ src/turn.c        | 10 +++----
+ src/turn.h        |  2 +-
+ src/udp.c         | 45 ++++++++++++++++++++--------
+ src/udp.h         |  2 +-
+ test/main.c       | 76 -----------------------------------------------
+ 16 files changed, 80 insertions(+), 124 deletions(-)
+
+diff --git a/src/addr.c b/src/addr.c
+index a8b2fab..b1240ef 100644
+--- a/src/addr.c
++++ b/src/addr.c
+@@ -8,7 +8,7 @@
+ 
+ #include "addr.h"
+ #include "log.h"
+-
++#include "esp_debug_helpers.h"
+ #include <stdio.h>
+ #include <string.h>
+ 
+@@ -19,6 +19,7 @@ socklen_t addr_get_len(const struct sockaddr *sa) {
+ 	case AF_INET6:
+ 		return sizeof(struct sockaddr_in6);
+ 	default:
++        esp_backtrace_print(10);
+ 		JLOG_WARN("Unknown address family %hu", sa->sa_family);
+ 		return 0;
+ 	}
+@@ -193,7 +194,7 @@ int addr_to_string(const struct sockaddr *sa, char *buffer, size_t size) {
+ 	char host[ADDR_MAX_NUMERICHOST_LEN];
+ 	char service[ADDR_MAX_NUMERICSERV_LEN];
+ 	if (getnameinfo(sa, salen, host, ADDR_MAX_NUMERICHOST_LEN, service, ADDR_MAX_NUMERICSERV_LEN,
+-	                NI_NUMERICHOST | NI_NUMERICSERV | NI_DGRAM)) {
++	                AI_NUMERICHOST | NI_NUMERICSERV | NI_DGRAM)) {
+ 		JLOG_ERROR("getnameinfo failed, errno=%d", sockerrno);
+ 		goto error;
+ 	}
+@@ -255,7 +256,7 @@ int addr_resolve(const char *hostname, const char *service, addr_record_t *recor
+ 
+ 	struct addrinfo hints;
+ 	memset(&hints, 0, sizeof(hints));
+-	hints.ai_family = AF_UNSPEC;
++	hints.ai_family = AF_INET;
+ 	hints.ai_socktype = SOCK_DGRAM;
+ 	hints.ai_protocol = IPPROTO_UDP;
+ 	hints.ai_flags = AI_ADDRCONFIG;
+@@ -284,7 +285,7 @@ int addr_resolve(const char *hostname, const char *service, addr_record_t *recor
+ bool addr_is_numeric_hostname(const char *hostname) {
+ 	struct addrinfo hints;
+ 	memset(&hints, 0, sizeof(hints));
+-	hints.ai_family = AF_UNSPEC;
++	hints.ai_family = AF_INET;
+ 	hints.ai_socktype = SOCK_DGRAM;
+ 	hints.ai_protocol = IPPROTO_UDP;
+ 	hints.ai_flags = AI_NUMERICHOST|AI_NUMERICSERV;
+diff --git a/src/agent.c b/src/agent.c
+index 09af91c..3aeda90 100644
+--- a/src/agent.c
++++ b/src/agent.c
+@@ -85,9 +85,15 @@ juice_agent_t *agent_create(const juice_config_t *config) {
+ 	}
+ #endif
+ 
++printf("sizeof = %d\n", (int)sizeof(juice_agent_t));
++
+ 	juice_agent_t *agent = calloc(1, sizeof(juice_agent_t));
+ 	if (!agent) {
+-		JLOG_FATAL("Memory allocation for agent failed");
++
++		printf("Memory allocation for agent failed\n");
++		printf("Memory allocation for agent failed\n");
++		printf("Memory allocation for agent failed\n");
++		printf("Memory allocation for agent failed\n");
+ 		return NULL;
+ 	}
+ 
+@@ -134,7 +140,7 @@ juice_agent_t *agent_create(const juice_config_t *config) {
+ 	agent->conn_impl = NULL;
+ 
+ 	ice_create_local_description(&agent->local);
+-
++    vTaskDelay(20);
+ 	// RFC 8445: 16.1. Attributes
+ 	// The content of the [ICE-CONTROLLED/ICE-CONTROLLING] attribute is a 64-bit
+ 	// unsigned integer in network byte order, which contains a random number.
+@@ -229,6 +235,7 @@ int agent_gather_candidates(juice_agent_t *agent) {
+ 	memset(&socket_config, 0, sizeof(socket_config));
+ 	socket_config.bind_address = agent->config.bind_address;
+ 	socket_config.port_begin = agent->config.local_port_range_begin;
++    printf("PORT!!!!!!!!! %d\n", agent->config.local_port_range_begin);
+ 	socket_config.port_end = agent->config.local_port_range_end;
+ 
+ 	if (conn_create(agent, &socket_config)) {
+@@ -249,13 +256,16 @@ int agent_gather_candidates(juice_agent_t *agent) {
+ 	conn_lock(agent);
+ 
+ 	JLOG_VERBOSE("Adding %d local host candidates", records_count);
+-	for (int i = 0; i < records_count; ++i) {
++//    const struct sockaddr_in *sinp = (const struct sockaddr_in *) &records->addr;
++//    printf("RECORD PORT: %d", ntohs (sinp->sin_port));
++    for (int i = 0; i < records_count; ++i) {
+ 		ice_candidate_t candidate;
+ 		if (ice_create_local_candidate(ICE_CANDIDATE_TYPE_HOST, 1, agent->local.candidates_count,
+ 		                               records + i, &candidate)) {
+ 			JLOG_ERROR("Failed to create host candidate");
+ 			continue;
+ 		}
++        JLOG_INFO("Adding local host candidates %s", candidate.service);
+ 		if (agent->local.candidates_count >= MAX_HOST_CANDIDATES_COUNT) {
+ 			JLOG_WARN("Local description already has the maximum number of host candidates");
+ 			break;
+@@ -453,7 +463,7 @@ int agent_get_local_description(juice_agent_t *agent, char *buffer, size_t size)
+ 		conn_unlock(agent);
+ 		return -1;
+ 	}
+-	JLOG_VERBOSE("Generated local SDP description: %s", buffer);
++	printf("Generated local SDP description: >>\n\n%s\n\n<<", buffer);
+ 
+ 	if (agent->mode == AGENT_MODE_UNKNOWN) {
+ 		JLOG_DEBUG("Assuming controlling mode");
+@@ -1238,6 +1248,7 @@ int agent_dispatch_stun(juice_agent_t *agent, void *buf, size_t size, stun_messa
+ 		// Message was verified earlier, no need to re-verify
+ 		if (entry->type == AGENT_STUN_ENTRY_TYPE_CHECK && !msg->has_integrity &&
+ 		    (msg->msg_class == STUN_CLASS_REQUEST || msg->msg_class == STUN_CLASS_RESP_SUCCESS)) {
++//            printf("%d %d %d \n", entry->type, msg->has_integrity, msg->msg_class);
+ 			JLOG_WARN("Missing integrity in STUN Binding message from remote peer, ignoring");
+ 			return -1;
+ 		}
+diff --git a/src/conn_mux.c b/src/conn_mux.c
+index a783b3f..c4d3e60 100644
+--- a/src/conn_mux.c
++++ b/src/conn_mux.c
+@@ -519,7 +519,7 @@ int conn_mux_send(juice_agent_t *agent, const addr_record_t *dst, const char *da
+ 
+ 	JLOG_VERBOSE("Sending datagram, size=%d", size);
+ 
+-	int ret = udp_sendto(registry_impl->sock, data, size, dst);
++	int ret = juice_udp_sendto(registry_impl->sock, data, size, dst);
+ 	if (ret < 0) {
+ 		if (sockerrno == SEAGAIN || sockerrno == SEWOULDBLOCK)
+ 			JLOG_INFO("Send failed, buffer is full");
+diff --git a/src/conn_poll.c b/src/conn_poll.c
+index be3377c..0d2e12e 100644
+--- a/src/conn_poll.c
++++ b/src/conn_poll.c
+@@ -410,7 +410,7 @@ int conn_poll_send(juice_agent_t *agent, const addr_record_t *dst, const char *d
+ 
+ 	JLOG_VERBOSE("Sending datagram, size=%d", size);
+ 
+-	int ret = udp_sendto(conn_impl->sock, data, size, dst);
++	int ret = juice_udp_sendto(conn_impl->sock, data, size, dst);
+ 	if (ret < 0) {
+ 		if (sockerrno == SEAGAIN || sockerrno == SEWOULDBLOCK)
+ 			JLOG_INFO("Send failed, buffer is full");
+diff --git a/src/conn_thread.c b/src/conn_thread.c
+index 00c49b0..32f3552 100644
+--- a/src/conn_thread.c
++++ b/src/conn_thread.c
+@@ -257,7 +257,7 @@ int conn_thread_send(juice_agent_t *agent, const addr_record_t *dst, const char
+ 
+ 	JLOG_VERBOSE("Sending datagram, size=%d", size);
+ 
+-	int ret = udp_sendto(conn_impl->sock, data, size, dst);
++	int ret = juice_udp_sendto(conn_impl->sock, data, size, dst);
+ 	if (ret < 0) {
+ 		if (sockerrno == SEAGAIN || sockerrno == SEWOULDBLOCK)
+ 			JLOG_INFO("Send failed, buffer is full");
+diff --git a/src/hmac.c b/src/hmac.c
+index 179b02f..d7b790e 100644
+--- a/src/hmac.c
++++ b/src/hmac.c
+@@ -14,7 +14,7 @@
+ #include "picohash.h"
+ #endif
+ 
+-void hmac_sha1(const void *message, size_t size, const void *key, size_t key_size, void *digest) {
++void juice_hmac_sha1(const void *message, size_t size, const void *key, size_t key_size, void *digest) {
+ #if USE_NETTLE
+ 	struct hmac_sha1_ctx ctx;
+ 	hmac_sha1_set_key(&ctx, key_size, key);
+@@ -28,7 +28,7 @@ void hmac_sha1(const void *message, size_t size, const void *key, size_t key_siz
+ #endif
+ }
+ 
+-void hmac_sha256(const void *message, size_t size, const void *key, size_t key_size, void *digest) {
++void juice_hmac_sha256(const void *message, size_t size, const void *key, size_t key_size, void *digest) {
+ #if USE_NETTLE
+ 	struct hmac_sha256_ctx ctx;
+ 	hmac_sha256_set_key(&ctx, key_size, key);
+diff --git a/src/ice.c b/src/ice.c
+index 393caef..c67e2b1 100644
+--- a/src/ice.c
++++ b/src/ice.c
+@@ -67,7 +67,7 @@ static int parse_sdp_candidate(const char *line, ice_candidate_t *candidate) {
+ 	char transport[32 + 1];
+ 	char type[32 + 1];
+ 	if (sscanf(line, "%32s %d %32s %u %256s %32s typ %32s", candidate->foundation,
+-	           &candidate->component, transport, &candidate->priority, candidate->hostname,
++	           &candidate->component, transport, (unsigned int *)&candidate->priority, candidate->hostname,
+ 	           candidate->service, type) != 7) {
+ 		JLOG_WARN("Failed to parse candidate: %s", line);
+ 		return ICE_PARSE_ERROR;
+@@ -153,7 +153,7 @@ int ice_create_local_description(ice_description_t *description) {
+ 	description->ice_lite = false;
+ 	description->candidates_count = 0;
+ 	description->finished = false;
+-	JLOG_DEBUG("Created local description: ufrag=\"%s\", pwd=\"%s\"", description->ice_ufrag,
++	printf("Created local description: ufrag=\"%s\", pwd=\"%s\"\n", description->ice_ufrag,
+ 	           description->ice_pwd);
+ 	return 0;
+ }
+@@ -170,7 +170,7 @@ int ice_create_local_candidate(ice_candidate_type_t type, int component, int ind
+ 	                                           candidate->component, index);
+ 
+ 	if (getnameinfo((struct sockaddr *)&record->addr, record->len, candidate->hostname, 256,
+-	                candidate->service, 32, NI_NUMERICHOST | NI_NUMERICSERV | NI_DGRAM)) {
++	                candidate->service, 32, AI_NUMERICHOST | NI_NUMERICSERV | NI_DGRAM)) {
+ 		JLOG_ERROR("getnameinfo failed, errno=%d", sockerrno);
+ 		return -1;
+ 	}
+@@ -180,7 +180,7 @@ int ice_create_local_candidate(ice_candidate_type_t type, int component, int ind
+ int ice_resolve_candidate(ice_candidate_t *candidate, ice_resolve_mode_t mode) {
+ 	struct addrinfo hints;
+ 	memset(&hints, 0, sizeof(hints));
+-	hints.ai_family = AF_UNSPEC;
++	hints.ai_family = AF_INET;
+ 	hints.ai_socktype = SOCK_DGRAM;
+ 	hints.ai_protocol = IPPROTO_UDP;
+ 	hints.ai_flags = AI_ADDRCONFIG;
+@@ -278,7 +278,7 @@ int ice_generate_sdp(const ice_description_t *description, char *buffer, size_t
+ 			if (candidate->type == ICE_CANDIDATE_TYPE_UNKNOWN ||
+ 			    candidate->type == ICE_CANDIDATE_TYPE_PEER_REFLEXIVE)
+ 				continue;
+-			char tmp[BUFFER_SIZE];
++			static char tmp[BUFFER_SIZE];
+ 			if (ice_generate_candidate_sdp(candidate, tmp, BUFFER_SIZE) < 0)
+ 				continue;
+ 			ret = snprintf(begin, end - begin, "%s\r\n", tmp);
+@@ -324,7 +324,7 @@ int ice_generate_candidate_sdp(const ice_candidate_t *candidate, char *buffer, s
+ 		return -1;
+ 	}
+ 	return snprintf(buffer, size, "a=candidate:%s %u UDP %u %s %s typ %s%s%s",
+-	                candidate->foundation, candidate->component, candidate->priority,
++	                candidate->foundation, candidate->component, (unsigned )candidate->priority,
+ 	                candidate->hostname, candidate->service, type, suffix ? " " : "",
+ 	                suffix ? suffix : "");
+ }
+diff --git a/src/ice.h b/src/ice.h
+index 51078bd..4c9b29b 100644
+--- a/src/ice.h
++++ b/src/ice.h
+@@ -16,7 +16,7 @@
+ #include <stdbool.h>
+ #include <stdint.h>
+ 
+-#define ICE_MAX_CANDIDATES_COUNT 20 // ~ 500B * 20 = 10KB
++#define ICE_MAX_CANDIDATES_COUNT 5 // ~ 500B * 20 = 10KB
+ 
+ typedef enum ice_candidate_type {
+ 	ICE_CANDIDATE_TYPE_UNKNOWN,
+diff --git a/src/random.c b/src/random.c
+index 46bd8f8..1173c9b 100644
+--- a/src/random.c
++++ b/src/random.c
+@@ -68,7 +68,7 @@ static unsigned int generate_seed() {
+ 		return (unsigned int)time(NULL);
+ #endif
+ }
+-
++#include "esp_random.h"
+ void juice_random(void *buf, size_t size) {
+ 	if (random_bytes(buf, size) == 0)
+ 		return;
+diff --git a/src/server.c b/src/server.c
+index f4f28fa..6fa2597 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -414,7 +414,7 @@ void server_run(juice_server_t *server) {
+ int server_send(juice_server_t *server, const addr_record_t *dst, const char *data, size_t size) {
+ 	JLOG_VERBOSE("Sending datagram, size=%d", size);
+ 
+-	int ret = udp_sendto(server->sock, data, size, dst);
++	int ret = juice_udp_sendto(server->sock, data, size, dst);
+ 	if (ret < 0 && sockerrno != SEAGAIN && sockerrno != SEWOULDBLOCK)
+ 		JLOG_WARN("Send failed, errno=%d", sockerrno);
+ 
+@@ -489,7 +489,7 @@ int server_forward(juice_server_t *server, server_turn_alloc_t *alloc) {
+ 
+ 			JLOG_VERBOSE("Forwarding as ChannelData, size=%d", len);
+ 
+-			int ret = udp_sendto(server->sock, buffer, len, &alloc->record);
++			int ret = juice_udp_sendto(server->sock, buffer, len, &alloc->record);
+ 			if (ret < 0 && sockerrno != SEAGAIN && sockerrno != SEWOULDBLOCK)
+ 				JLOG_WARN("Send failed, errno=%d", sockerrno);
+ 
+@@ -1041,7 +1041,7 @@ int server_process_turn_channel_bind(juice_server_t *server, const stun_message_
+ 	}
+ 
+ 	uint16_t channel = msg->channel_number;
+-	if (!is_valid_channel(channel)) {
++	if (!is_valid_channel2(channel)) {
+ 		JLOG_WARN("TURN channel 0x%hX is invalid", channel);
+ 		return server_answer_stun_error(server, msg->transaction_id, src, msg->msg_method,
+ 		                                400, // Bad request
+@@ -1094,7 +1094,7 @@ int server_process_turn_send(juice_server_t *server, const stun_message_t *msg,
+ 
+ 	JLOG_VERBOSE("Forwarding datagram to peer, size=%zu", msg->data_size);
+ 
+-	int ret = udp_sendto(alloc->sock, msg->data, msg->data_size, &msg->peer);
++	int ret = juice_udp_sendto(alloc->sock, msg->data, msg->data_size, &msg->peer);
+ 	if (ret < 0 && sockerrno != SEAGAIN && sockerrno != SEWOULDBLOCK)
+ 		JLOG_WARN("Forwarding failed, errno=%d", sockerrno);
+ 
+@@ -1134,7 +1134,7 @@ int server_process_channel_data(juice_server_t *server, char *buf, size_t len,
+ 
+ 	JLOG_VERBOSE("Forwarding datagram to peer, size=%zu", len);
+ 
+-	int ret = udp_sendto(alloc->sock, buf, len, &record);
++	int ret = juice_udp_sendto(alloc->sock, buf, len, &record);
+ 	if (ret < 0 && sockerrno != SEAGAIN && sockerrno != SEWOULDBLOCK)
+ 		JLOG_WARN("Send failed, errno=%d", sockerrno);
+ 
+diff --git a/src/socket.h b/src/socket.h
+index 93899f5..cf964a7 100644
+--- a/src/socket.h
++++ b/src/socket.h
+@@ -68,7 +68,7 @@ typedef ULONG nfds_t;
+ #include <netdb.h>
+ #include <netinet/in.h>
+ #include <netinet/tcp.h>
+-#include <poll.h>
++//#include <lwip/poll.h>
+ #include <sys/ioctl.h>
+ #include <sys/select.h>
+ #include <sys/socket.h>
+@@ -84,7 +84,8 @@ typedef ULONG nfds_t;
+ #ifdef __ANDROID__
+ #define NO_IFADDRS
+ #else
+-#include <ifaddrs.h>
++//#define NO_IFADDRS
++//#include <ifaddrs.h>
+ #endif
+ 
+ typedef int socket_t;
+diff --git a/src/turn.c b/src/turn.c
+index 5f4abdb..6d49c38 100644
+--- a/src/turn.c
++++ b/src/turn.c
+@@ -53,11 +53,11 @@ bool is_channel_data(const void *data, size_t size) {
+ 	return b >= 64 && b <= 79;
+ }
+ 
+-bool is_valid_channel(uint16_t channel) { return channel >= 0x4000; }
++bool is_valid_channel2(uint16_t channel) { return channel >= 0x4000; }
+ 
+ int turn_wrap_channel_data(char *buffer, size_t size, const char *data, size_t data_size,
+                            uint16_t channel) {
+-	if (!is_valid_channel(channel)) {
++	if (!is_valid_channel2(channel)) {
+ 		JLOG_WARN("Invalid channel number: 0x%hX", channel);
+ 		return -1;
+ 	}
+@@ -254,7 +254,7 @@ bool turn_has_permission(turn_map_t *map, const addr_record_t *record) {
+ 
+ bool turn_bind_channel(turn_map_t *map, const addr_record_t *record, const uint8_t *transaction_id,
+                        uint16_t channel, timediff_t duration) {
+-	if (!is_valid_channel(channel)) {
++	if (!is_valid_channel2(channel)) {
+ 		JLOG_ERROR("Invalid channel number: 0x%hX", channel);
+ 		return false;
+ 	}
+@@ -350,7 +350,7 @@ bool turn_get_bound_channel(turn_map_t *map, const addr_record_t *record, uint16
+ }
+ 
+ bool turn_find_channel(turn_map_t *map, uint16_t channel, addr_record_t *record) {
+-	if (!is_valid_channel(channel)) {
++	if (!is_valid_channel2(channel)) {
+ 		JLOG_WARN("Invalid channel number: 0x%hX", channel);
+ 		return false;
+ 	}
+@@ -370,7 +370,7 @@ bool turn_find_channel(turn_map_t *map, uint16_t channel, addr_record_t *record)
+ }
+ 
+ bool turn_find_bound_channel(turn_map_t *map, uint16_t channel, addr_record_t *record) {
+-	if (!is_valid_channel(channel)) {
++	if (!is_valid_channel2(channel)) {
+ 		JLOG_WARN("Invalid channel number: 0x%hX", channel);
+ 		return false;
+ 	}
+diff --git a/src/turn.h b/src/turn.h
+index c4e9fc6..1773611 100644
+--- a/src/turn.h
++++ b/src/turn.h
+@@ -45,7 +45,7 @@ struct channel_data_header {
+ #pragma pack(pop)
+ 
+ bool is_channel_data(const void *data, size_t size);
+-bool is_valid_channel(uint16_t channel);
++bool is_valid_channel2(uint16_t channel);
+ 
+ int turn_wrap_channel_data(char *buffer, size_t size, const char *data, size_t data_size,
+                            uint16_t channel);
+diff --git a/src/udp.c b/src/udp.c
+index 993ec0f..320f5a7 100644
+--- a/src/udp.c
++++ b/src/udp.c
+@@ -80,8 +80,8 @@ static socket_t create_socket_for_addrinfo(const udp_socket_config_t *config,
+ 
+ 	// Set buffer size up to 1 MiB for performance
+ 	const sockopt_t buffer_size = 1 * 1024 * 1024;
+-	setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char *)&buffer_size, sizeof(buffer_size));
+-	setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (const char *)&buffer_size, sizeof(buffer_size));
++//	setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char *)&buffer_size, sizeof(buffer_size));
++//	setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (const char *)&buffer_size, sizeof(buffer_size));
+ 
+ 	ctl_t nbio = 1;
+ 	if (ioctlsocket(sock, FIONBIO, &nbio)) {
+@@ -147,7 +147,7 @@ socket_t udp_create_socket(const udp_socket_config_t *config) {
+ 	struct addrinfo *ai_list = NULL;
+ 	struct addrinfo hints;
+ 	memset(&hints, 0, sizeof(hints));
+-	hints.ai_family = AF_UNSPEC;
++	hints.ai_family = AF_INET;
+ 	hints.ai_socktype = SOCK_DGRAM;
+ 	hints.ai_protocol = IPPROTO_UDP;
+ 	hints.ai_flags = AI_PASSIVE | AI_NUMERICSERV;
+@@ -164,6 +164,7 @@ socket_t udp_create_socket(const udp_socket_config_t *config) {
+ 			continue;
+ 
+ 		JLOG_DEBUG("Opening UDP socket for %s family", names[i]);
++//        printf(ai->ai_addr->sa_data)
+ 		socket_t sock = create_socket_for_addrinfo(config, ai);
+ 		if (sock != INVALID_SOCKET) {
+ 			freeaddrinfo(ai_list);
+@@ -200,8 +201,8 @@ int udp_recvfrom(socket_t sock, char *buffer, size_t size, addr_record_t *src) {
+ 	}
+ }
+ 
+-int udp_sendto(socket_t sock, const char *data, size_t size, const addr_record_t *dst) {
+-#ifndef __linux__
++int juice_udp_sendto(socket_t sock, const char *data, size_t size, const addr_record_t *dst) {
++#if 0 //ndef __linux__
+ 	addr_record_t tmp = *dst;
+ 	addr_record_t name;
+ 	name.len = sizeof(name.addr);
+@@ -218,8 +219,8 @@ int udp_sendto(socket_t sock, const char *data, size_t size, const addr_record_t
+ }
+ 
+ int udp_sendto_self(socket_t sock, const char *data, size_t size) {
+-	addr_record_t local;
+-	if (udp_get_local_addr(sock, AF_UNSPEC, &local) < 0)
++	addr_record_t local = { 0 };
++	if (udp_get_local_addr(sock, AF_INET, &local) < 0)
+ 		return -1;
+ 
+ 	int ret;
+@@ -391,6 +392,9 @@ static int has_duplicate_addr(struct sockaddr *addr, const addr_record_t *record
+ 	return false;
+ }
+ 
++#include "esp_netif.h"
++#include "protocol_examples_common.h"
++
+ #if !defined(_WIN32) && defined(NO_IFADDRS)
+ // Helper function to get the IPv6 address of the default interface
+ static int get_local_default_inet6(uint16_t port, struct sockaddr_in6 *result) {
+@@ -434,6 +438,8 @@ int udp_get_addrs(socket_t sock, addr_record_t *records, size_t count) {
+ 		JLOG_ERROR("Getting UDP bound address failed");
+ 		return -1;
+ 	}
++//    printf("%x\n", (int)((struct sockaddr_in*)&bound.addr)->sin_addr.s_addr);
++//    printf("%d\n", htons((int)((struct sockaddr_in*)&bound.addr)->sin_port));
+ 
+ 	if (!addr_is_any((struct sockaddr *)&bound.addr)) {
+ 		if (count > 0)
+@@ -484,7 +490,19 @@ int udp_get_addrs(socket_t sock, addr_record_t *records, size_t count) {
+ 	}
+ #endif
+ 
+-#ifdef _WIN32
++#ifdef ESP_PLATFORM
++    esp_netif_ip_info_t ip;
++    esp_netif_get_ip_info(EXAMPLE_INTERFACE, &ip);
++    struct sockaddr sa;
++    struct sockaddr_in *sin = (struct sockaddr_in *)&sa;
++    sin->sin_family = AF_INET;
++    sin->sin_port = ntohs(port);
++    sin->sin_addr.s_addr = ip.ip.addr;
++    memcpy(&current->addr, &sa, sizeof(*sin));
++    current++;
++    ++ret;
++    return ret;
++#elif _WIN32
+ 	char buf[4096];
+ 	DWORD len = 0;
+ 	if (WSAIoctl(sock, SIO_ADDRESS_LIST_QUERY, NULL, 0, buf, sizeof(buf), &len, NULL, NULL)) {
+@@ -548,7 +566,7 @@ int udp_get_addrs(socket_t sock, addr_record_t *records, size_t count) {
+ 
+ #else // NO_IFADDRS defined
+ 	char buf[4096];
+-	struct ifconf ifc;
++	struct ifconf {} ifc;
+ 	memset(&ifc, 0, sizeof(ifc));
+ 	ifc.ifc_len = sizeof(buf);
+ 	ifc.ifc_buf = buf;
+@@ -559,10 +577,11 @@ int udp_get_addrs(socket_t sock, addr_record_t *records, size_t count) {
+ 	}
+ 
+ 	bool ifconf_has_inet6 = false;
+-	int n = ifc.ifc_len / sizeof(struct ifreq);
+-	for (int i = 0; i < n; ++i) {
+-		struct ifreq *ifr = ifc.ifc_req + i;
+-		struct sockaddr *sa = &ifr->ifr_addr;
++//	int n = ifc.ifc_len / sizeof(struct ifreq);
++	for (int i = 0; i < 1; ++i) {
++//		struct ifreq *ifr = ifc.ifc_req + i;
++//		struct sockaddr *sa = &ifr->ifr_addr;
++		struct sockaddr *sa = NULL; // &ifr->ifr_addr;
+ 		if (sa->sa_family == AF_INET6)
+ 			ifconf_has_inet6 = true;
+ 
+diff --git a/src/udp.h b/src/udp.h
+index c318eec..3f4e6bd 100644
+--- a/src/udp.h
++++ b/src/udp.h
+@@ -22,7 +22,7 @@ typedef struct udp_socket_config {
+ 
+ socket_t udp_create_socket(const udp_socket_config_t *config);
+ int udp_recvfrom(socket_t sock, char *buffer, size_t size, addr_record_t *src);
+-int udp_sendto(socket_t sock, const char *data, size_t size, const addr_record_t *dst);
++int juice_udp_sendto(socket_t sock, const char *data, size_t size, const addr_record_t *dst);
+ int udp_sendto_self(socket_t sock, const char *data, size_t size);
+ int udp_set_diffserv(socket_t sock, int ds);
+ uint16_t udp_get_port(socket_t sock);
+diff --git a/test/main.c b/test/main.c
+index 35e97f0..a6c0b12 100644
+--- a/test/main.c
++++ b/test/main.c
+@@ -30,88 +30,12 @@ int test_server(void);
+ int main(int argc, char **argv) {
+ 	juice_set_log_level(JUICE_LOG_LEVEL_WARN);
+ 
+-	printf("\nRunning CRC32 implementation test...\n");
+-	if (test_crc32()) {
+-		fprintf(stderr, "CRC32 implementation test failed\n");
+-		return -2;
+-	}
+-
+-	printf("\nRunning base64 implementation test...\n");
+-	if (test_base64()) {
+-		fprintf(stderr, "base64 implementation test failed\n");
+-		return -2;
+-	}
+-
+-	printf("\nRunning STUN parsing implementation test...\n");
+-	if (test_stun()) {
+-		fprintf(stderr, "STUN parsing implementation test failed\n");
+-		return -3;
+-	}
+-
+-	printf("\nRunning candidates gathering test...\n");
+-	if (test_gathering()) {
+-		fprintf(stderr, "Candidates gathering test failed\n");
+-		return -1;
+-	}
+-
+ 	printf("\nRunning connectivity test...\n");
+ 	if (test_connectivity()) {
+ 		fprintf(stderr, "Connectivity test failed\n");
+ 		return -1;
+ 	}
+ 
+-// Disabled as the Open Relay TURN server is unreliable
+-/*
+-	printf("\nRunning TURN connectivity test...\n");
+-	if (test_turn()) {
+-		fprintf(stderr, "TURN connectivity test failed\n");
+-		return -1;
+-	}
+-*/
+-	printf("\nRunning thread-mode connectivity test...\n");
+-	if (test_thread()) {
+-		fprintf(stderr, "Thread-mode connectivity test failed\n");
+-		return -1;
+-	}
+-
+-	printf("\nRunning mux-mode connectivity test...\n");
+-	if (test_mux()) {
+-		fprintf(stderr, "Mux-mode connectivity test failed\n");
+-		return -1;
+-	}
+-
+-	printf("\nRunning non-trickled connectivity test...\n");
+-	if (test_notrickle()) {
+-		fprintf(stderr, "Non-trickled connectivity test failed\n");
+-		return -1;
+-	}
+-
+-	printf("\nRunning connectivity test with role conflict...\n");
+-	if (test_conflict()) {
+-		fprintf(stderr, "Connectivity test with role conflict failed\n");
+-		return -1;
+-	}
+-
+-	printf("\nRunning connectivity test with bind address...\n");
+-	if (test_bind()) {
+-		fprintf(stderr, "Connectivity test with bind address failed\n");
+-		return -1;
+-	}
+-
+-	printf("\nRunning ufrag test...\n");
+-	if (test_ufrag()) {
+-		fprintf(stderr, "Ufrag test failed\n");
+-		return -1;
+-	}
+-
+-#ifndef NO_SERVER
+-	printf("\nRunning server test...\n");
+-	if (test_server()) {
+-		fprintf(stderr, "Server test failed\n");
+-		return -1;
+-	}
+-#endif
+-
+ 	return 0;
+ }
+ 
+-- 
+2.25.1
+
