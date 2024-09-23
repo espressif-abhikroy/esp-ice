@@ -1,0 +1,5 @@
+version: "0.1.0"
+description: esp-ice
+dependencies:
+  idf:
+    version: ">=5.0"
