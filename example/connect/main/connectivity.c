@@ -16,11 +16,21 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "esp_netif_sntp.h"
 
 #define BUFFER_SIZE 1024
+#define START_COLLECTING    1
+#define COLLECTING_DONE     2
 
 static juice_agent_t *agent1;
 static EventGroupHandle_t event_group = NULL;
+
+#define DESC_SIZE 256
+#define MAX_CANDS 4
+
+static char s_remote_desc[DESC_SIZE];
+static int s_remote_cand = 0;
+static char s_remote_cands[MAX_CANDS][DESC_SIZE];
 
 static void on_state_changed1(juice_agent_t *agent, juice_state_t state, void *user_ptr);
 static void on_candidate1(juice_agent_t *agent, const char *sdp, void *user_ptr);
@@ -45,7 +55,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     esp_mqtt_event_handle_t event = event_data;
     esp_mqtt_client_handle_t client = event->client;
     int msg_id;
-    static int ready_already = 0;
     switch ((esp_mqtt_event_id_t)event_id) {
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
@@ -77,24 +86,28 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
             printf("DATA=%.*s\r\n", event->data_len, event->data);
             if (memcmp(event->topic, "/topic123789/desc" THEIR_CLIENT, event->topic_len) == 0) {
-                event->data[event->data_len] = '\0';
-                juice_set_remote_description(agent1, event->data);
+                memcpy(s_remote_desc, event->data, event->data_len);
+                s_remote_desc[event->data_len] = '\0';
+//                juice_set_remote_description(agent1, event->data);
             }
             if (memcmp(event->topic, "/topic123789/cand" THEIR_CLIENT, event->topic_len) == 0) {
-                event->data[event->data_len] = '\0';
-                juice_add_remote_candidate(agent1, event->data);
+                memcpy(s_remote_cands[s_remote_cand], event->data, event->data_len);
+                s_remote_cands[s_remote_cand][event->data_len] = '\0';
+                s_remote_cand++;
+//                event->data[event->data_len] = '\0';
+                // store it in global vars;
+                // juice_add_remote_candidate(agent1, event->data);
             }
             if (memcmp(event->topic, "/topic123789/done" THEIR_CLIENT, event->topic_len) == 0) {
-                xEventGroupSetBits(event_group, 2);
+//                xEventGroupSetBits(event_group, 2);
             }
             if (memcmp(event->topic, "/topic123789/ready" THEIR_CLIENT, event->topic_len) == 0) {
-                ESP_LOGE(TAG, "Their is ready!");
-                if (!ready_already) {
+#ifdef CLIENT2
                     msg_id = esp_mqtt_client_publish(client, "/topic123789/ready" OUR_CLIENT, "our client is ready", 0, 0, 0);
-                    ESP_LOGI(TAG, "published msg_id %d", msg_id);
-                    ready_already = 1;
-                }
-                xEventGroupSetBits(event_group, 1);
+                    ESP_LOGD(TAG, "published msg_id %d", msg_id);
+#endif
+                xEventGroupSetBits(event_group, START_COLLECTING);
+                ESP_LOGI(TAG, "START_COLLECTING");
             }
 
             break;
@@ -108,6 +121,34 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 }
 
 static esp_mqtt_client_handle_t client = NULL;
+#include <time.h>
+
+static void setup_sntp(void)
+{
+    time_t now;
+    struct tm timeinfo;
+    char strftime_buf[64];
+
+    ESP_LOGI(TAG, "Initializing SNTP");
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("time.windows.com");
+    esp_netif_sntp_init(&config);
+    int retry = 0;
+    const int retry_count = 10;
+    while (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(2000)) != ESP_OK && ++retry < retry_count) {
+        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
+    }
+    if (retry == retry_count) {
+        abort();
+    }
+    time(&now);
+    setenv("TZ", "CET-1", 1);
+    tzset();
+    localtime_r(&now, &timeinfo);
+    strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
+    ESP_LOGI(TAG, "current date/time is: %s", strftime_buf);
+
+
+}
 
 int test_connectivity() {
     event_group = xEventGroupCreate();
@@ -121,12 +162,29 @@ int test_connectivity() {
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(client);
 
-    ESP_LOGW(TAG, "Waiting for ready signal...");
-    while (!xEventGroupWaitBits(event_group, 1, pdTRUE, pdTRUE, pdMS_TO_TICKS(10000))) {
-        int msg_id = esp_mqtt_client_publish(client, "/topic123789/ready" OUR_CLIENT, "our client is ready", 0, 0, 0);
-        ESP_LOGI(TAG, "published msg_id %d", msg_id);
+    setup_sntp();
+
+    ESP_LOGI(TAG, "Waiting for the other peer...");
+    while (!xEventGroupWaitBits(event_group, START_COLLECTING, pdTRUE, pdTRUE, pdMS_TO_TICKS(1000))) {
+#ifdef CLIENT1
+         int msg_id = esp_mqtt_client_publish(client, "/topic123789/ready" OUR_CLIENT, "READY1", 0, 0, 0);
+         ESP_LOGD(TAG, "published msg_id %d", msg_id);
+#endif
+         printf(".");
+     }
+    printf("\n");
+
+    struct tm timeinfo = {};
+    time_t now;
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    int sync_hour = timeinfo.tm_hour;
+    int sync_min = timeinfo.tm_min + 1;
+    if (sync_min >= 60) {
+        sync_min -= 60;
+        sync_hour += 1;
     }
-    ESP_LOGW(TAG, "Their client is ready, start");
+    ESP_LOGI(TAG, "Planned sync at: %02d:%02d:03", sync_hour, sync_min);
 
     juice_set_log_level(JUICE_LOG_LEVEL_VERBOSE);
 
@@ -144,25 +202,52 @@ int test_connectivity() {
     config1.cb_recv = on_recv1;
     config1.user_ptr = NULL;
 
-    vTaskDelay(pdMS_TO_TICKS(1000));
     agent1 = juice_create(&config1);
 
     // Agent 1: Generate local description
     static char sdp1[JUICE_MAX_SDP_STRING_LEN];
     juice_get_local_description(agent1, sdp1, JUICE_MAX_SDP_STRING_LEN);
-    printf("Local description 1:\n%s\n", sdp1);
+//    printf("Local description 1:\n%s\n", sdp1);
     int msg_id = esp_mqtt_client_publish(client, "/topic123789/desc" OUR_CLIENT, sdp1, 0, 0, 0);
-    ESP_LOGI(TAG, "published msg_id %d", msg_id);
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    ESP_LOGD(TAG, "published msg_id %d", msg_id);
+//    vTaskDelay(pdMS_TO_TICKS(5000));
 
     // Agent 1: Gather candidates (and send them to agent 2)
     juice_gather_candidates(agent1);
-    xEventGroupWaitBits(event_group, 2, pdTRUE, pdTRUE, portMAX_DELAY);
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    ESP_LOGI(TAG, "Waiting for gathering local candidates...");
+    while (!xEventGroupWaitBits(event_group, COLLECTING_DONE, pdTRUE, pdTRUE, pdMS_TO_TICKS(1000))) {
+        printf(".");
+    }
+    printf("\n");
+    int last_sec = 0;
+    while (1) {
+        time(&now);
+        localtime_r(&now, &timeinfo);
+        if (last_sec != timeinfo.tm_sec) {
+            ESP_LOGI(TAG, "seconds %d", timeinfo.tm_sec);
+            last_sec = timeinfo.tm_sec;
+            if (timeinfo.tm_hour == sync_hour && timeinfo.tm_min == sync_min && timeinfo.tm_sec == 3) {
+                break;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+     }
+
+    // Setup remote desc + candidates
+    juice_set_remote_description(agent1, s_remote_desc);
+    for (int i = 0; i < s_remote_cand; ++i) {
+        juice_add_remote_candidate(agent1, s_remote_cands[i]);
+        ESP_LOGI(TAG, "adds cand[%d]: %s", i, s_remote_cands[i]);
+    }
+
 
     // Check states
-    juice_state_t state1 = juice_get_state(agent1);
-    printf("STATE: %d\n", state1);
+    juice_state_t state1 = 0;
+    while (state1 != JUICE_STATE_COMPLETED && state1 != JUICE_STATE_FAILED) {
+        state1 = juice_get_state(agent1);
+        ESP_LOGI(TAG, "Checking state: %d", state1);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
     bool success = (state1 == JUICE_STATE_COMPLETED);
 
     // Retrieve candidates
@@ -187,6 +272,11 @@ int test_connectivity() {
         printf("Remote address 1: %s\n", remoteAddr);
     }
 
+    while (1) {
+        juice_send(agent1, "message" OUR_CLIENT,6);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
     // Agent 1: destroy
     juice_destroy(agent1);
 
@@ -197,6 +287,21 @@ int test_connectivity() {
         printf("Failure\n");
         return -1;
     }
+
+
+ /*
+
+0) init sntp
+1) get description   -- cat to string
+2) gather candidates -- cat to string
+3) wait for the gathering done callback
+4) send the string (desc + candidates) over mqtt
+5) --- wait for sync --
+6)
+
+ */
+
+
 }
 
 // Agent 1: on state changed
@@ -218,8 +323,7 @@ static void on_candidate1(juice_agent_t *agent, const char *sdp, void *user_ptr)
 
 static void on_gathering_done1(juice_agent_t *agent, void *user_ptr) {
     ESP_LOGI("[1]", "Gathering done 1\n");
-    int msg_id = esp_mqtt_client_publish(client, "/topic123789/done" OUR_CLIENT, "gathering done", 0, 0, 0);
-    ESP_LOGI(TAG, "published msg_id %d", msg_id);
+    xEventGroupSetBits(event_group, COLLECTING_DONE);
 }
 
 static void on_recv1(juice_agent_t *agent, const char *data, size_t size, void *user_ptr) {
