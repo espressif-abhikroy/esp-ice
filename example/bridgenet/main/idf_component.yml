@@ -1,0 +1,5 @@
+dependencies:
+  esp-ice:
+    path: ../../..
+  espressif/mosquitto:
+    version: "*"
